@@ -3,8 +3,8 @@
 A small command-line tool for Volcengine / Doubao text-to-speech HTTP synthesis.
 
 It is intentionally lightweight: no runtime dependencies, no credentials in the repo,
-and a simple `volc-tts` command that reads credentials from environment variables or
-a local `.env` file.
+and a simple `volc-tts` command that reads credentials from persisted auth config,
+environment variables, or a local `.env` file.
 
 ## Install
 
@@ -22,7 +22,44 @@ node src/cli.js "你好，这是一次火山语音合成测试。" -o speech.mp3
 
 ## Configure
 
-Copy the example env file:
+The easiest way is to persist credentials with the CLI:
+
+```bash
+volc-tts auth login
+```
+
+Or pass values non-interactively:
+
+```bash
+volc-tts auth login \
+  --app-id your_app_id \
+  --token your_access_token \
+  --voice your_voice_type
+```
+
+Credentials are stored at:
+
+```text
+~/.config/volc-tts-cli/config.json
+```
+
+The CLI writes this file with `600` permissions when the platform allows it.
+Command-line flags override environment variables, and environment variables
+override the persisted auth config.
+
+Check auth status:
+
+```bash
+volc-tts auth status
+```
+
+Remove persisted credentials:
+
+```bash
+volc-tts auth logout
+```
+
+You can still use a local `.env` file instead:
 
 ```bash
 cp .env.example .env
@@ -102,8 +139,25 @@ volc-tts "测试一下。" --stdout > speech.mp3
 --request-json <json>      Merge extra JSON into payload.request
 --app-json <json>          Merge extra JSON into payload.app
 --header <name:value>      Add a custom HTTP header
+--config <file>            Auth config path
 --env-file <file>          Load env file, default: .env when present
 --dry-run                  Print the request with secrets redacted
+```
+
+## Auth Commands
+
+```bash
+volc-tts auth login
+volc-tts auth login --app-id appid --token token --voice voice_type
+volc-tts auth status
+volc-tts auth logout
+```
+
+Use a custom config path when testing or when you want multiple profiles:
+
+```bash
+volc-tts auth login --config ./my-voice.json
+volc-tts "测试一下。" --config ./my-voice.json -o speech.mp3
 ```
 
 ## Notes

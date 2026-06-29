@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
+import { dirname, join, resolve } from "node:path";
 
 const DEFAULT_ENDPOINT = "https://openspeech.bytedance.com/api/v1/tts";
+const CONFIG_FILE_NAME = "config.json";
 
 function printHelp() {
   console.log(`volc-tts - Volcengine / Doubao text-to-speech CLI
@@ -14,11 +16,15 @@ Usage:
   volc-tts "要合成的文本" -o out.mp3
   volc-tts --text "要合成的文本" --out out.wav --encoding wav
   volc-tts --input script.txt --out out.mp3
+  volc-tts auth login
+  volc-tts auth status
+  volc-tts auth logout
 
 Required config:
   VOLC_TTS_APP_ID       or --app-id
   VOLC_TTS_TOKEN        or --token
   VOLC_TTS_VOICE_TYPE   or --voice
+  Or run: volc-tts auth login
 
 Options:
   -t, --text <text>              Text to synthesize
@@ -44,12 +50,14 @@ Options:
       --request-json <json>      Merge extra JSON into payload.request
       --app-json <json>          Merge extra JSON into payload.app
       --header <name:value>      Add a custom HTTP header; repeatable
+      --config <file>            Auth config path, default: ~/.config/volc-tts-cli/config.json
       --env-file <file>          Load env file, default: .env when present
       --dry-run                  Print the request with secrets redacted
   -h, --help                     Show help
       --version                  Show version
 
 Examples:
+  volc-tts auth login --app-id appid --token token --voice voice_type
   volc-tts "今天这期主要看几个 AI 开发工具。" -o speech.mp3
   volc-tts --input script.txt --voice zh_female_xxx --encoding wav -o speech.wav
 `);
@@ -151,6 +159,9 @@ function parseArgs(argv) {
       case "--header":
         options.headers.push(next());
         break;
+      case "--config":
+        options.config = next();
+        break;
       case "--env-file":
         options.envFile = next();
         break;
@@ -205,8 +216,8 @@ function unquoteEnv(value) {
   return value;
 }
 
-function envOrOption(optionValue, envName, fallback = undefined) {
-  return optionValue ?? process.env[envName] ?? fallback;
+function configuredValue(optionValue, envName, configValue, fallback = undefined) {
+  return optionValue ?? process.env[envName] ?? configValue ?? fallback;
 }
 
 function assertFiniteNumber(name, value) {
@@ -288,6 +299,230 @@ function redact(value) {
   return `${value.slice(0, 4)}****${value.slice(-4)}`;
 }
 
+function getDefaultConfigPath() {
+  if (process.env.VOLC_TTS_CONFIG) return resolve(process.env.VOLC_TTS_CONFIG);
+
+  if (process.platform === "win32" && process.env.APPDATA) {
+    return join(process.env.APPDATA, "volc-tts-cli", CONFIG_FILE_NAME);
+  }
+
+  const home = process.env.HOME ?? process.cwd();
+  const base = process.env.XDG_CONFIG_HOME ?? join(home, ".config");
+  return join(base, "volc-tts-cli", CONFIG_FILE_NAME);
+}
+
+function getConfigPath(options = {}) {
+  return resolve(options.config ?? getDefaultConfigPath());
+}
+
+async function loadAuthConfig(path) {
+  try {
+    const content = await readFile(path, "utf8");
+    const parsed = JSON.parse(content);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed;
+  } catch (error) {
+    if (error.code === "ENOENT") return {};
+    throw new Error(`Failed to read auth config ${path}: ${error.message}`);
+  }
+}
+
+async function saveAuthConfig(path, config) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await chmod(dirname(path), 0o700).catch(() => {});
+  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await chmod(path, 0o600).catch(() => {});
+}
+
+async function removeAuthConfig(path) {
+  try {
+    await unlink(path);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
+async function promptText(question, defaultValue) {
+  if (!process.stdin.isTTY) {
+    throw new Error(`Missing ${question}. Pass it as an option when running non-interactively.`);
+  }
+
+  const suffix = defaultValue ? ` [${defaultValue}]` : "";
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = await rl.question(`${question}${suffix}: `);
+    return answer.trim() || defaultValue || "";
+  } finally {
+    rl.close();
+  }
+}
+
+async function promptSecret(question, defaultValue) {
+  if (!process.stdin.isTTY) {
+    throw new Error(`Missing ${question}. Pass it as an option when running non-interactively.`);
+  }
+
+  return new Promise((resolveSecret, rejectSecret) => {
+    const input = process.stdin;
+    const output = process.stderr;
+    const wasRaw = input.isRaw;
+    let value = "";
+
+    const cleanup = () => {
+      input.off("data", onData);
+      if (input.isTTY) input.setRawMode(wasRaw);
+      input.pause();
+    };
+
+    const finish = () => {
+      output.write("\n");
+      cleanup();
+      resolveSecret(value || defaultValue || "");
+    };
+
+    const onData = (chunk) => {
+      const chars = chunk.toString("utf8");
+      for (const char of chars) {
+        if (char === "\u0003") {
+          output.write("\n");
+          cleanup();
+          rejectSecret(new Error("Interrupted"));
+          return;
+        }
+        if (char === "\r" || char === "\n") {
+          finish();
+          return;
+        }
+        if (char === "\u007f") {
+          if (value.length > 0) value = value.slice(0, -1);
+          continue;
+        }
+        value += char;
+        output.write("*");
+      }
+    };
+
+    output.write(`${question}${defaultValue ? ` [${redact(defaultValue)}]` : ""}: `);
+    input.setEncoding("utf8");
+    if (input.isTTY) input.setRawMode(true);
+    input.resume();
+    input.on("data", onData);
+  });
+}
+
+async function handleAuth(argv) {
+  const action = argv[0] ?? "status";
+
+  if (action === "-h" || action === "--help") {
+    printAuthHelp();
+    return;
+  }
+
+  const options = parseArgs(argv.slice(1));
+  if (options.help) {
+    printAuthHelp();
+    return;
+  }
+
+  await loadEnvFile(options.envFile ?? ".env");
+  const configPath = getConfigPath(options);
+
+  if (action === "login") {
+    const existing = await loadAuthConfig(configPath);
+    const appId =
+      options.appId ??
+      process.env.VOLC_TTS_APP_ID ??
+      (await promptText("App ID", existing.appId));
+    const token =
+      options.token ??
+      process.env.VOLC_TTS_TOKEN ??
+      (await promptSecret("Access token", existing.token));
+    const voice =
+      options.voice ??
+      process.env.VOLC_TTS_VOICE_TYPE ??
+      (await promptText("Voice type", existing.voice));
+
+    const nextConfig = {
+      appId,
+      token,
+      voice,
+      cluster: configuredValue(options.cluster, "VOLC_TTS_CLUSTER", existing.cluster, "volcano_tts"),
+      endpoint: configuredValue(options.endpoint, "VOLC_TTS_ENDPOINT", existing.endpoint, DEFAULT_ENDPOINT),
+      resourceId: configuredValue(options.resourceId, "VOLC_TTS_RESOURCE_ID", existing.resourceId),
+      uid: configuredValue(options.uid, "VOLC_TTS_UID", existing.uid, "volc-tts-cli"),
+      encoding: configuredValue(options.encoding, "VOLC_TTS_ENCODING", existing.encoding, "mp3"),
+      updatedAt: new Date().toISOString(),
+    };
+
+    validateStoredAuth(nextConfig);
+    await saveAuthConfig(configPath, nextConfig);
+    console.error(`Saved auth config to ${configPath}`);
+    return;
+  }
+
+  if (action === "status") {
+    const config = await loadAuthConfig(configPath);
+    printAuthStatus(configPath, config);
+    return;
+  }
+
+  if (action === "logout") {
+    await removeAuthConfig(configPath);
+    console.error(`Removed auth config from ${configPath}`);
+    return;
+  }
+
+  throw new Error(`Unknown auth command: ${action}`);
+}
+
+function printAuthHelp() {
+  console.log(`volc-tts auth - manage persisted credentials
+
+Usage:
+  volc-tts auth login
+  volc-tts auth login --app-id appid --token token --voice voice_type
+  volc-tts auth status
+  volc-tts auth logout
+
+Options:
+  --app-id <appid>        Volcengine TTS app ID
+  --token <token>         Volcengine TTS access token
+  --voice <voice_type>    Voice type / voice ID
+  --cluster <cluster>     TTS cluster
+  --endpoint <url>        TTS endpoint
+  --resource-id <id>      Optional API resource ID header
+  --uid <uid>             User ID in request payload
+  --encoding <format>     Default audio encoding
+  --config <file>         Auth config path
+  --env-file <file>       Load env file before auth login
+`);
+}
+
+function validateStoredAuth(config) {
+  const missing = [];
+  if (!config.appId) missing.push("app ID");
+  if (!config.token) missing.push("access token");
+  if (!config.voice) missing.push("voice type");
+  if (missing.length > 0) {
+    throw new Error(`Missing required auth value: ${missing.join(", ")}`);
+  }
+}
+
+function printAuthStatus(configPath, config) {
+  const hasConfig = Object.keys(config).length > 0;
+  console.log(`Config: ${configPath}`);
+  console.log(`Status: ${hasConfig ? "logged in" : "not logged in"}`);
+  if (!hasConfig) return;
+  console.log(`App ID: ${config.appId ?? ""}`);
+  console.log(`Token: ${redact(config.token)}`);
+  console.log(`Voice: ${config.voice ?? ""}`);
+  console.log(`Cluster: ${config.cluster ?? ""}`);
+  console.log(`Endpoint: ${config.endpoint ?? ""}`);
+  if (config.resourceId) console.log(`Resource ID: ${config.resourceId}`);
+  if (config.encoding) console.log(`Encoding: ${config.encoding}`);
+  if (config.updatedAt) console.log(`Updated: ${config.updatedAt}`);
+}
+
 function redactRequest(headers, payload) {
   return {
     headers: {
@@ -366,7 +601,14 @@ function looksLikeJson(text) {
 }
 
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+
+  if (argv[0] === "auth") {
+    await handleAuth(argv.slice(1));
+    return;
+  }
+
+  const options = parseArgs(argv);
 
   if (options.help) {
     printHelp();
@@ -380,21 +622,22 @@ async function main() {
   }
 
   await loadEnvFile(options.envFile ?? ".env");
+  const authConfig = await loadAuthConfig(getConfigPath(options));
 
   const text = await getText(options);
   const config = {
-    appId: envOrOption(options.appId, "VOLC_TTS_APP_ID"),
-    token: envOrOption(options.token, "VOLC_TTS_TOKEN"),
-    voice: envOrOption(options.voice, "VOLC_TTS_VOICE_TYPE"),
-    cluster: envOrOption(options.cluster, "VOLC_TTS_CLUSTER", "volcano_tts"),
-    endpoint: envOrOption(options.endpoint, "VOLC_TTS_ENDPOINT", DEFAULT_ENDPOINT),
-    resourceId: envOrOption(options.resourceId, "VOLC_TTS_RESOURCE_ID"),
-    uid: envOrOption(options.uid, "VOLC_TTS_UID", "volc-tts-cli"),
-    encoding: envOrOption(options.encoding, "VOLC_TTS_ENCODING", "mp3"),
-    speed: options.speed ?? Number(process.env.VOLC_TTS_SPEED ?? 1),
-    volume: options.volume ?? Number(process.env.VOLC_TTS_VOLUME ?? 1),
-    pitch: options.pitch ?? Number(process.env.VOLC_TTS_PITCH ?? 1),
-    operation: envOrOption(options.operation, "VOLC_TTS_OPERATION", "query"),
+    appId: configuredValue(options.appId, "VOLC_TTS_APP_ID", authConfig.appId),
+    token: configuredValue(options.token, "VOLC_TTS_TOKEN", authConfig.token),
+    voice: configuredValue(options.voice, "VOLC_TTS_VOICE_TYPE", authConfig.voice),
+    cluster: configuredValue(options.cluster, "VOLC_TTS_CLUSTER", authConfig.cluster, "volcano_tts"),
+    endpoint: configuredValue(options.endpoint, "VOLC_TTS_ENDPOINT", authConfig.endpoint, DEFAULT_ENDPOINT),
+    resourceId: configuredValue(options.resourceId, "VOLC_TTS_RESOURCE_ID", authConfig.resourceId),
+    uid: configuredValue(options.uid, "VOLC_TTS_UID", authConfig.uid, "volc-tts-cli"),
+    encoding: configuredValue(options.encoding, "VOLC_TTS_ENCODING", authConfig.encoding, "mp3"),
+    speed: options.speed ?? Number(process.env.VOLC_TTS_SPEED ?? authConfig.speed ?? 1),
+    volume: options.volume ?? Number(process.env.VOLC_TTS_VOLUME ?? authConfig.volume ?? 1),
+    pitch: options.pitch ?? Number(process.env.VOLC_TTS_PITCH ?? authConfig.pitch ?? 1),
+    operation: configuredValue(options.operation, "VOLC_TTS_OPERATION", authConfig.operation, "query"),
   };
   options.resourceId = config.resourceId;
 
