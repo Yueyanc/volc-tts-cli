@@ -1,0 +1,121 @@
+# volc-tts-cli
+
+A small command-line tool for Volcengine / Doubao text-to-speech HTTP synthesis.
+
+It is intentionally lightweight: no runtime dependencies, no credentials in the repo,
+and a simple `volc-tts` command that reads credentials from environment variables or
+a local `.env` file.
+
+## Install
+
+```bash
+git clone https://github.com/Yueyanc/volc-tts-cli.git
+cd volc-tts-cli
+npm link
+```
+
+Or run directly:
+
+```bash
+node src/cli.js "你好，这是一次火山语音合成测试。" -o speech.mp3
+```
+
+## Configure
+
+Copy the example env file:
+
+```bash
+cp .env.example .env
+```
+
+Fill in:
+
+```bash
+VOLC_TTS_APP_ID=your_app_id
+VOLC_TTS_TOKEN=your_access_token
+VOLC_TTS_VOICE_TYPE=your_voice_type
+```
+
+Optional values:
+
+```bash
+VOLC_TTS_CLUSTER=volcano_tts
+VOLC_TTS_ENDPOINT=https://openspeech.bytedance.com/api/v1/tts
+VOLC_TTS_ENCODING=mp3
+VOLC_TTS_SPEED=1
+VOLC_TTS_VOLUME=1
+VOLC_TTS_PITCH=1
+```
+
+## Usage
+
+```bash
+volc-tts "今天这期主要看几个人工智能开发工具。" -o speech.mp3
+```
+
+Read from a file:
+
+```bash
+volc-tts --input script.txt --out speech.wav --encoding wav
+```
+
+Override voice and speed:
+
+```bash
+volc-tts "你好，欢迎回来。" --voice your_voice_type --speed 1.12 -o out.mp3
+```
+
+Inspect the request without sending secrets:
+
+```bash
+volc-tts "测试一下。" --dry-run
+```
+
+Write audio bytes to stdout:
+
+```bash
+volc-tts "测试一下。" --stdout > speech.mp3
+```
+
+## Options
+
+```text
+--text <text>              Text to synthesize
+--input <file>             Read text from a UTF-8 file
+--out <file>               Output audio path
+--stdout                   Write audio bytes to stdout
+--voice <voice_type>       Voice type / voice ID
+--app-id <appid>           Volcengine TTS app ID
+--token <token>            Volcengine TTS access token
+--cluster <cluster>        TTS cluster, default: volcano_tts
+--endpoint <url>           TTS endpoint
+--resource-id <id>         Optional API resource ID header for newer endpoints
+--uid <uid>                User ID in request payload
+--encoding <format>        mp3, wav, pcm, ogg_opus
+--speed <number>           Speed ratio
+--volume <number>          Volume ratio
+--pitch <number>           Pitch ratio
+--rate <number>            Sample rate
+--language <lang>          Optional language code
+--emotion <emotion>        Optional emotion/style field when supported
+--audio-json <json>        Merge extra JSON into payload.audio
+--request-json <json>      Merge extra JSON into payload.request
+--app-json <json>          Merge extra JSON into payload.app
+--header <name:value>      Add a custom HTTP header
+--env-file <file>          Load env file, default: .env when present
+--dry-run                  Print the request with secrets redacted
+```
+
+## Notes
+
+- This CLI targets the common HTTP non-streaming TTS shape used by Volcengine / Doubao
+  speech synthesis: app config, user, audio config, and a request object.
+- Some newer products or private voice resources may require extra headers or payload
+  fields. Use `--resource-id`, `--header`, `--audio-json`, `--request-json`, or
+  `--app-json` to add those without changing the CLI.
+- Keep `.env` private. It is ignored by git.
+
+## References
+
+- Volcengine CLI: https://github.com/volcengine/volcengine-cli
+- Volcengine speech docs: https://www.volcengine.com/docs/6561/2277844
