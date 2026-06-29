@@ -358,6 +358,7 @@ function buildApiKeyPayload(text, config, options) {
   if (options.speechRate !== undefined) audioParams.speech_rate = options.speechRate;
   if (options.loudnessRate !== undefined) audioParams.loudness_rate = options.loudnessRate;
   if (options.pitchRate !== undefined) audioParams.pitch_rate = options.pitchRate;
+  if (options.emotion) audioParams.emotion = options.emotion;
   if (options.emotionScale !== undefined) audioParams.emotion_scale = options.emotionScale;
   Object.assign(audioParams, options.audioJson ?? {});
 
@@ -385,7 +386,6 @@ function buildApiKeyPayload(text, config, options) {
       additions: JSON.stringify(additions),
       ...(options.model ? { model: options.model } : {}),
       ...(options.language ? { language: options.language } : {}),
-      ...(options.emotion ? { emotion: options.emotion } : {}),
       ...(options.requestJson ?? {}),
     },
   };

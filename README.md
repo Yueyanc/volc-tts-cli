@@ -219,6 +219,9 @@ volc-tts "测试一下。" --config ./my-voice.json -o speech.mp3
 - Some newer products or private voice resources may require extra headers or payload
   fields. Use `--resource-id`, `--header`, `--audio-json`, `--request-json`, or
   `--app-json` to add those without changing the CLI.
+- `--emotion` is sent as `audio_params.emotion` in API-key mode. It is most useful
+  with voices whose speaker metadata includes explicit `Emotions`; many 2.0
+  instruction-following voices only expose softer `context_texts` control.
 - Keep `.env` private. It is ignored by git.
 
 ## References
