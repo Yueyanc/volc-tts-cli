@@ -7,6 +7,9 @@ import { createInterface } from "node:readline/promises";
 import { dirname, join, resolve } from "node:path";
 
 const DEFAULT_ENDPOINT = "https://openspeech.bytedance.com/api/v1/tts";
+const DEFAULT_V3_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
+const DEFAULT_V3_RESOURCE_ID = "seed-tts-2.0";
+const DEFAULT_V3_VOICE = "zh_female_xiaohe_uranus_bigtts";
 const CONFIG_FILE_NAME = "config.json";
 
 function printHelp() {
@@ -21,9 +24,9 @@ Usage:
   volc-tts auth logout
 
 Required config:
-  VOLC_TTS_APP_ID       or --app-id
-  VOLC_TTS_TOKEN        or --token
-  VOLC_TTS_VOICE_TYPE   or --voice
+  New API-key mode: VOLC_TTS_API_KEY or --api-key
+  Legacy mode:      VOLC_TTS_APP_ID + VOLC_TTS_TOKEN, or --app-id + --token
+  Voice:            VOLC_TTS_VOICE_TYPE or --voice
   Or run: volc-tts auth login
 
 Options:
@@ -32,6 +35,7 @@ Options:
   -o, --out <file>               Output audio path
       --stdout                   Write audio bytes to stdout
       --voice <voice_type>       Voice type / voice ID
+      --api-key <key>            Volcengine / Doubao speech API key
       --app-id <appid>           Volcengine TTS app ID
       --token <token>            Volcengine TTS access token
       --cluster <cluster>        TTS cluster, default: volcano_tts
@@ -57,6 +61,7 @@ Options:
       --version                  Show version
 
 Examples:
+  volc-tts auth login --api-key your_api_key --voice ${DEFAULT_V3_VOICE}
   volc-tts auth login --app-id appid --token token --voice voice_type
   volc-tts "今天这期主要看几个 AI 开发工具。" -o speech.mp3
   volc-tts --input script.txt --voice zh_female_xxx --encoding wav -o speech.wav
@@ -104,6 +109,9 @@ function parseArgs(argv) {
         break;
       case "--voice":
         options.voice = next();
+        break;
+      case "--api-key":
+        options.apiKey = next();
         break;
       case "--app-id":
         options.appId = next();
@@ -234,15 +242,18 @@ async function getText(options) {
   throw new Error("Text is required. Pass a positional text, --text, or --input.");
 }
 
-function buildHeaders(token, options) {
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer;${token}`,
-  };
+function buildHeaders(config, options) {
+  const headers = { "Content-Type": "application/json" };
 
-  if (options.resourceId) {
-    headers["X-Api-Resource-Id"] = options.resourceId;
-    headers["Resource-Id"] = options.resourceId;
+  if (config.authMode === "api-key") {
+    headers["X-Api-Key"] = config.apiKey;
+  } else {
+    headers.Authorization = `Bearer;${config.token}`;
+  }
+
+  if (config.resourceId) {
+    headers["X-Api-Resource-Id"] = config.resourceId;
+    headers["Resource-Id"] = config.resourceId;
   }
 
   for (const header of options.headers ?? []) {
@@ -258,6 +269,14 @@ function buildHeaders(token, options) {
 }
 
 function buildPayload(text, config, options) {
+  if (config.authMode === "api-key") {
+    return buildApiKeyPayload(text, config, options);
+  }
+
+  return buildLegacyPayload(text, config, options);
+}
+
+function buildLegacyPayload(text, config, options) {
   const audio = {
     voice_type: config.voice,
     encoding: config.encoding,
@@ -291,6 +310,40 @@ function buildPayload(text, config, options) {
       ...(options.requestJson ?? {}),
     },
   };
+}
+
+function buildApiKeyPayload(text, config, options) {
+  const audioParams = {
+    format: normalizeV3Encoding(config.encoding),
+    sample_rate: options.rate ?? 24000,
+  };
+
+  if (config.speed !== 1) audioParams.speech_rate = config.speed;
+  if (config.volume !== 1) audioParams.volume = config.volume;
+  if (config.pitch !== 1) audioParams.pitch_rate = config.pitch;
+
+  return {
+    user: {
+      uid: config.uid,
+    },
+    req_params: {
+      text,
+      speaker: config.voice,
+      audio_params: audioParams,
+      additions: JSON.stringify({
+        disable_markdown_filter: true,
+      }),
+      ...(options.language ? { language: options.language } : {}),
+      ...(options.emotion ? { emotion: options.emotion } : {}),
+      ...(options.requestJson ?? {}),
+    },
+  };
+}
+
+function normalizeV3Encoding(encoding) {
+  if (encoding === "ogg") return "ogg_opus";
+  if (encoding === "raw" || encoding === "wav") return "pcm";
+  return encoding;
 }
 
 function redact(value) {
@@ -429,26 +482,44 @@ async function handleAuth(argv) {
 
   if (action === "login") {
     const existing = await loadAuthConfig(configPath);
-    const appId =
-      options.appId ??
-      process.env.VOLC_TTS_APP_ID ??
-      (await promptText("App ID", existing.appId));
-    const token =
-      options.token ??
-      process.env.VOLC_TTS_TOKEN ??
-      (await promptSecret("Access token", existing.token));
+    const apiKey =
+      options.apiKey ??
+      process.env.VOLC_TTS_API_KEY ??
+      existing.apiKey ??
+      (await promptSecret("API key (leave empty for legacy App ID/Token)", ""));
+    const appId = apiKey
+      ? undefined
+      : options.appId ??
+        process.env.VOLC_TTS_APP_ID ??
+        (await promptText("App ID", existing.appId));
+    const token = apiKey
+      ? undefined
+      : options.token ??
+        process.env.VOLC_TTS_TOKEN ??
+        (await promptSecret("Access token", existing.token));
     const voice =
       options.voice ??
       process.env.VOLC_TTS_VOICE_TYPE ??
-      (await promptText("Voice type", existing.voice));
+      (await promptText("Voice type", existing.voice ?? DEFAULT_V3_VOICE));
 
     const nextConfig = {
+      apiKey,
       appId,
       token,
       voice,
       cluster: configuredValue(options.cluster, "VOLC_TTS_CLUSTER", existing.cluster, "volcano_tts"),
-      endpoint: configuredValue(options.endpoint, "VOLC_TTS_ENDPOINT", existing.endpoint, DEFAULT_ENDPOINT),
-      resourceId: configuredValue(options.resourceId, "VOLC_TTS_RESOURCE_ID", existing.resourceId),
+      endpoint: configuredValue(
+        options.endpoint,
+        "VOLC_TTS_ENDPOINT",
+        existing.endpoint,
+        apiKey ? DEFAULT_V3_ENDPOINT : DEFAULT_ENDPOINT,
+      ),
+      resourceId: configuredValue(
+        options.resourceId,
+        "VOLC_TTS_RESOURCE_ID",
+        existing.resourceId,
+        apiKey ? DEFAULT_V3_RESOURCE_ID : undefined,
+      ),
       uid: configuredValue(options.uid, "VOLC_TTS_UID", existing.uid, "volc-tts-cli"),
       encoding: configuredValue(options.encoding, "VOLC_TTS_ENCODING", existing.encoding, "mp3"),
       updatedAt: new Date().toISOString(),
@@ -485,6 +556,7 @@ Usage:
   volc-tts auth logout
 
 Options:
+  --api-key <key>         Volcengine / Doubao speech API key
   --app-id <appid>        Volcengine TTS app ID
   --token <token>         Volcengine TTS access token
   --voice <voice_type>    Voice type / voice ID
@@ -500,8 +572,8 @@ Options:
 
 function validateStoredAuth(config) {
   const missing = [];
-  if (!config.appId) missing.push("app ID");
-  if (!config.token) missing.push("access token");
+  if (!config.apiKey && !config.appId) missing.push("API key or app ID");
+  if (!config.apiKey && !config.token) missing.push("access token");
   if (!config.voice) missing.push("voice type");
   if (missing.length > 0) {
     throw new Error(`Missing required auth value: ${missing.join(", ")}`);
@@ -513,8 +585,9 @@ function printAuthStatus(configPath, config) {
   console.log(`Config: ${configPath}`);
   console.log(`Status: ${hasConfig ? "logged in" : "not logged in"}`);
   if (!hasConfig) return;
-  console.log(`App ID: ${config.appId ?? ""}`);
-  console.log(`Token: ${redact(config.token)}`);
+  if (config.apiKey) console.log(`API Key: ${redact(config.apiKey)}`);
+  if (config.appId) console.log(`App ID: ${config.appId}`);
+  if (config.token) console.log(`Token: ${redact(config.token)}`);
   console.log(`Voice: ${config.voice ?? ""}`);
   console.log(`Cluster: ${config.cluster ?? ""}`);
   console.log(`Endpoint: ${config.endpoint ?? ""}`);
@@ -528,22 +601,28 @@ function redactRequest(headers, payload) {
     headers: {
       ...headers,
       Authorization: headers.Authorization ? "Bearer;****" : undefined,
+      "X-Api-Key": headers["X-Api-Key"] ? "****" : undefined,
     },
-    payload: {
-      ...payload,
-      app: {
-        ...payload.app,
-        token: redact(payload.app.token),
-      },
-    },
+    payload: payload.app
+      ? {
+          ...payload,
+          app: {
+            ...payload.app,
+            token: redact(payload.app.token),
+          },
+        }
+      : payload,
   };
 }
 
 function validateConfig(config, options) {
   const missing = [];
-  if (!config.appId) missing.push("VOLC_TTS_APP_ID or --app-id");
-  if (!config.token) missing.push("VOLC_TTS_TOKEN or --token");
+  if (!config.apiKey && !config.appId) missing.push("VOLC_TTS_API_KEY/--api-key or VOLC_TTS_APP_ID/--app-id");
+  if (!config.apiKey && !config.token) missing.push("VOLC_TTS_TOKEN or --token");
   if (!config.voice) missing.push("VOLC_TTS_VOICE_TYPE or --voice");
+  if (config.authMode === "api-key" && !config.resourceId) {
+    missing.push("VOLC_TTS_RESOURCE_ID or --resource-id");
+  }
   if (missing.length > 0) {
     throw new Error(`Missing required config: ${missing.join(", ")}`);
   }
@@ -572,13 +651,17 @@ function extensionForEncoding(encoding) {
   return encoding || "mp3";
 }
 
-async function parseTtsResponse(response) {
+async function parseTtsResponse(response, config) {
   const contentType = response.headers.get("content-type") ?? "";
   const raw = Buffer.from(await response.arrayBuffer());
   const text = raw.toString("utf8");
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${text}`);
+  }
+
+  if (config.authMode === "api-key") {
+    return parseApiKeyResponse(text, raw);
   }
 
   if (contentType.includes("application/json") || looksLikeJson(text)) {
@@ -593,6 +676,76 @@ async function parseTtsResponse(response) {
   }
 
   return raw;
+}
+
+function parseApiKeyResponse(text, raw) {
+  const trimmed = text.trim();
+  if (!trimmed) return raw;
+
+  const chunks = splitConcatenatedJson(trimmed);
+  if (chunks.length === 0) return raw;
+
+  const audioParts = [];
+  let lastError = null;
+
+  for (const chunk of chunks) {
+    const item = JSON.parse(chunk);
+    const code = item.code ?? item.status_code;
+    if (code !== undefined && !isSuccessCode(code)) {
+      lastError = item.message ?? item.error ?? JSON.stringify(item);
+      continue;
+    }
+    if (typeof item.data === "string" && item.data.length > 0) {
+      audioParts.push(Buffer.from(item.data, "base64"));
+    }
+  }
+
+  if (audioParts.length === 0) {
+    throw new Error(`TTS response has no audio data${lastError ? `: ${lastError}` : `: ${trimmed.slice(0, 500)}`}`);
+  }
+
+  return Buffer.concat(audioParts);
+}
+
+function isSuccessCode(code) {
+  return code === 0 || code === 20000000 || code === "0" || code === "20000000";
+}
+
+function splitConcatenatedJson(text) {
+  const chunks = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+    } else if (char === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        chunks.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return chunks;
 }
 
 function looksLikeJson(text) {
@@ -625,13 +778,27 @@ async function main() {
   const authConfig = await loadAuthConfig(getConfigPath(options));
 
   const text = await getText(options);
+  const apiKey = configuredValue(options.apiKey, "VOLC_TTS_API_KEY", authConfig.apiKey);
+  const authMode = apiKey ? "api-key" : "legacy";
   const config = {
+    authMode,
+    apiKey,
     appId: configuredValue(options.appId, "VOLC_TTS_APP_ID", authConfig.appId),
     token: configuredValue(options.token, "VOLC_TTS_TOKEN", authConfig.token),
-    voice: configuredValue(options.voice, "VOLC_TTS_VOICE_TYPE", authConfig.voice),
+    voice: configuredValue(options.voice, "VOLC_TTS_VOICE_TYPE", authConfig.voice, apiKey ? DEFAULT_V3_VOICE : undefined),
     cluster: configuredValue(options.cluster, "VOLC_TTS_CLUSTER", authConfig.cluster, "volcano_tts"),
-    endpoint: configuredValue(options.endpoint, "VOLC_TTS_ENDPOINT", authConfig.endpoint, DEFAULT_ENDPOINT),
-    resourceId: configuredValue(options.resourceId, "VOLC_TTS_RESOURCE_ID", authConfig.resourceId),
+    endpoint: configuredValue(
+      options.endpoint,
+      "VOLC_TTS_ENDPOINT",
+      authConfig.endpoint,
+      apiKey ? DEFAULT_V3_ENDPOINT : DEFAULT_ENDPOINT,
+    ),
+    resourceId: configuredValue(
+      options.resourceId,
+      "VOLC_TTS_RESOURCE_ID",
+      authConfig.resourceId,
+      apiKey ? DEFAULT_V3_RESOURCE_ID : undefined,
+    ),
     uid: configuredValue(options.uid, "VOLC_TTS_UID", authConfig.uid, "volc-tts-cli"),
     encoding: configuredValue(options.encoding, "VOLC_TTS_ENCODING", authConfig.encoding, "mp3"),
     speed: options.speed ?? Number(process.env.VOLC_TTS_SPEED ?? authConfig.speed ?? 1),
@@ -644,7 +811,7 @@ async function main() {
   validateConfig(config, options);
 
   const payload = buildPayload(text, config, options);
-  const headers = buildHeaders(config.token, options);
+  const headers = buildHeaders(config, options);
 
   if (options.dryRun) {
     console.log(JSON.stringify(redactRequest(headers, payload), null, 2));
@@ -657,7 +824,7 @@ async function main() {
     body: JSON.stringify(payload),
   });
 
-  const audio = await parseTtsResponse(response);
+  const audio = await parseTtsResponse(response, config);
   await writeAudio(audio, options, config.encoding);
 }
 

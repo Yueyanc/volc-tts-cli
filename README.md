@@ -22,19 +22,28 @@ node src/cli.js "你好，这是一次火山语音合成测试。" -o speech.mp3
 
 ## Configure
 
-The easiest way is to persist credentials with the CLI:
+The easiest way is to persist a Doubao Speech API key with the CLI:
 
 ```bash
-volc-tts auth login
+volc-tts auth login --api-key your_api_key
 ```
 
-Or pass values non-interactively:
+This uses the newer API-key mode:
+
+```text
+Endpoint: https://openspeech.bytedance.com/api/v3/tts/unidirectional
+Header: X-Api-Key
+Resource ID: seed-tts-2.0
+Default voice: zh_female_xiaohe_uranus_bigtts
+```
+
+You can choose a voice explicitly:
 
 ```bash
 volc-tts auth login \
-  --app-id your_app_id \
-  --token your_access_token \
-  --voice your_voice_type
+  --api-key your_api_key \
+  --voice zh_female_xiaohe_uranus_bigtts \
+  --resource-id seed-tts-2.0
 ```
 
 Credentials are stored at:
@@ -44,8 +53,8 @@ Credentials are stored at:
 ```
 
 The CLI writes this file with `600` permissions when the platform allows it.
-Command-line flags override environment variables, and environment variables
-override the persisted auth config.
+Command-line flags override environment variables, and environment variables override
+the persisted auth config.
 
 Check auth status:
 
@@ -68,16 +77,24 @@ cp .env.example .env
 Fill in:
 
 ```bash
-VOLC_TTS_APP_ID=your_app_id
-VOLC_TTS_TOKEN=your_access_token
+VOLC_TTS_API_KEY=your_api_key
+VOLC_TTS_RESOURCE_ID=seed-tts-2.0
 VOLC_TTS_VOICE_TYPE=your_voice_type
+```
+
+Legacy HTTP v1 credentials are still supported:
+
+```bash
+volc-tts auth login \
+  --app-id your_app_id \
+  --token your_access_token \
+  --voice your_voice_type
 ```
 
 Optional values:
 
 ```bash
 VOLC_TTS_CLUSTER=volcano_tts
-VOLC_TTS_ENDPOINT=https://openspeech.bytedance.com/api/v1/tts
 VOLC_TTS_ENCODING=mp3
 VOLC_TTS_SPEED=1
 VOLC_TTS_VOLUME=1
@@ -122,6 +139,7 @@ volc-tts "测试一下。" --stdout > speech.mp3
 --out <file>               Output audio path
 --stdout                   Write audio bytes to stdout
 --voice <voice_type>       Voice type / voice ID
+--api-key <key>            Volcengine / Doubao speech API key
 --app-id <appid>           Volcengine TTS app ID
 --token <token>            Volcengine TTS access token
 --cluster <cluster>        TTS cluster, default: volcano_tts
@@ -148,6 +166,7 @@ volc-tts "测试一下。" --stdout > speech.mp3
 
 ```bash
 volc-tts auth login
+volc-tts auth login --api-key api_key --voice voice_type
 volc-tts auth login --app-id appid --token token --voice voice_type
 volc-tts auth status
 volc-tts auth logout
