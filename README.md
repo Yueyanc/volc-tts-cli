@@ -119,6 +119,26 @@ Override voice and speed:
 volc-tts "你好，欢迎回来。" --voice your_voice_type --speed 1.12 -o out.mp3
 ```
 
+Use Doubao Speech 2.0 voice instructions through the official `context_texts`
+field:
+
+```bash
+volc-tts "GitHub 今日热点来了。" \
+  --context "像短视频科技博主自然开场，轻快、有精神，但不要播音腔。" \
+  --speech-rate 8 \
+  -o out.mp3
+```
+
+For supported voice-clone resources, you can also enable the official voice tag
+parser and put tags in the text:
+
+```bash
+volc-tts "[轻轻吐槽，带一点笑意]这个页面能出来，但味儿不对。" \
+  --model seed-tts-2.0-expressive \
+  --tag-parser \
+  -o tagged.mp3
+```
+
 Inspect the request without sending secrets:
 
 ```bash
@@ -153,6 +173,14 @@ volc-tts "测试一下。" --stdout > speech.mp3
 --rate <number>            Sample rate
 --language <lang>          Optional language code
 --emotion <emotion>        Optional emotion/style field when supported
+--model <model>            Optional v3 model, for example seed-tts-2.0-expressive
+--context <text>           v3 voice instruction/context_texts, repeatable
+--section-id <id>          v3 section ID for cross-request semantic continuity
+--tag-parser               Enable v3 voice tag parser when supported
+--speech-rate <int>        v3 speech rate, range -50..100
+--loudness-rate <int>      v3 loudness rate, range -50..100
+--pitch-rate <int>         v3 pitch rate
+--emotion-scale <number>   Optional v3 emotion strength when supported
 --audio-json <json>        Merge extra JSON into payload.audio
 --request-json <json>      Merge extra JSON into payload.request
 --app-json <json>          Merge extra JSON into payload.app
@@ -183,6 +211,11 @@ volc-tts "测试一下。" --config ./my-voice.json -o speech.mp3
 
 - This CLI targets the common HTTP non-streaming TTS shape used by Volcengine / Doubao
   speech synthesis: app config, user, audio config, and a request object.
+- In API-key mode, `--context` is serialized into `req_params.additions` as
+  `context_texts`, matching Doubao Speech 2.0's official voice instruction field.
+- Voice tags such as `[轻轻吐槽，带一点笑意]正文` require supported resources and
+  `--tag-parser`; for voice-clone resources, Volcengine documents
+  `--model seed-tts-2.0-expressive`.
 - Some newer products or private voice resources may require extra headers or payload
   fields. Use `--resource-id`, `--header`, `--audio-json`, `--request-json`, or
   `--app-json` to add those without changing the CLI.
@@ -191,4 +224,6 @@ volc-tts "测试一下。" --config ./my-voice.json -o speech.mp3
 ## References
 
 - Volcengine CLI: https://github.com/volcengine/volcengine-cli
-- Volcengine speech docs: https://www.volcengine.com/docs/6561/2277844
+- API-key mode: https://www.volcengine.com/docs/6561/1816214
+- Unidirectional TTS HTTP: https://www.volcengine.com/docs/6561/2528925
+- Voice instructions and tags: https://www.volcengine.com/docs/6561/1871062

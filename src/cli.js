@@ -49,6 +49,14 @@ Options:
       --rate <number>            Sample rate, for example 24000
       --language <lang>          Optional language code
       --emotion <emotion>        Optional emotion/style field when supported
+      --model <model>            Optional v3 model, for example seed-tts-2.0-expressive
+      --context <text>           v3 voice instruction/context_texts; repeatable
+      --section-id <id>          v3 section ID for cross-request semantic continuity
+      --tag-parser               Enable v3 voice tag parser when supported
+      --speech-rate <int>        v3 speech rate, range -50..100
+      --loudness-rate <int>      v3 loudness rate, range -50..100
+      --pitch-rate <int>         v3 pitch rate
+      --emotion-scale <number>   Optional v3 emotion strength when supported
       --operation <operation>    Request operation, default: query
       --audio-json <json>        Merge extra JSON into payload.audio
       --request-json <json>      Merge extra JSON into payload.request
@@ -71,6 +79,7 @@ Examples:
 function parseArgs(argv) {
   const options = {
     headers: [],
+    contexts: [],
     positional: [],
   };
 
@@ -151,6 +160,30 @@ function parseArgs(argv) {
         break;
       case "--emotion":
         options.emotion = next();
+        break;
+      case "--model":
+        options.model = next();
+        break;
+      case "--emotion-scale":
+        options.emotionScale = Number(next());
+        break;
+      case "--speech-rate":
+        options.speechRate = Number(next());
+        break;
+      case "--loudness-rate":
+        options.loudnessRate = Number(next());
+        break;
+      case "--pitch-rate":
+        options.pitchRate = Number(next());
+        break;
+      case "--context":
+        options.contexts.push(next());
+        break;
+      case "--section-id":
+        options.sectionId = next();
+        break;
+      case "--tag-parser":
+        options.tagParser = true;
         break;
       case "--operation":
         options.operation = next();
@@ -247,6 +280,7 @@ function buildHeaders(config, options) {
 
   if (config.authMode === "api-key") {
     headers["X-Api-Key"] = config.apiKey;
+    headers["X-Api-Request-Id"] = randomUUID();
   } else {
     headers.Authorization = `Bearer;${config.token}`;
   }
@@ -321,6 +355,24 @@ function buildApiKeyPayload(text, config, options) {
   if (config.speed !== 1) audioParams.speech_rate = config.speed;
   if (config.volume !== 1) audioParams.volume = config.volume;
   if (config.pitch !== 1) audioParams.pitch_rate = config.pitch;
+  if (options.speechRate !== undefined) audioParams.speech_rate = options.speechRate;
+  if (options.loudnessRate !== undefined) audioParams.loudness_rate = options.loudnessRate;
+  if (options.pitchRate !== undefined) audioParams.pitch_rate = options.pitchRate;
+  if (options.emotionScale !== undefined) audioParams.emotion_scale = options.emotionScale;
+  Object.assign(audioParams, options.audioJson ?? {});
+
+  const additions = {
+    disable_markdown_filter: true,
+  };
+  if (options.contexts.length > 0) {
+    additions.context_texts = options.contexts;
+  }
+  if (options.sectionId) {
+    additions.section_id = options.sectionId;
+  }
+  if (options.tagParser) {
+    additions.use_tag_parser = true;
+  }
 
   return {
     user: {
@@ -330,9 +382,8 @@ function buildApiKeyPayload(text, config, options) {
       text,
       speaker: config.voice,
       audio_params: audioParams,
-      additions: JSON.stringify({
-        disable_markdown_filter: true,
-      }),
+      additions: JSON.stringify(additions),
+      ...(options.model ? { model: options.model } : {}),
       ...(options.language ? { language: options.language } : {}),
       ...(options.emotion ? { emotion: options.emotion } : {}),
       ...(options.requestJson ?? {}),
@@ -631,6 +682,10 @@ function validateConfig(config, options) {
   assertFiniteNumber("--volume", options.volume);
   assertFiniteNumber("--pitch", options.pitch);
   assertFiniteNumber("--rate", options.rate);
+  assertFiniteNumber("--speech-rate", options.speechRate);
+  assertFiniteNumber("--loudness-rate", options.loudnessRate);
+  assertFiniteNumber("--pitch-rate", options.pitchRate);
+  assertFiniteNumber("--emotion-scale", options.emotionScale);
 }
 
 async function writeAudio(buffer, options, encoding) {
