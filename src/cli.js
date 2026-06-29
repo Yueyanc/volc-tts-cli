@@ -8,6 +8,8 @@ import { dirname, join, resolve } from "node:path";
 
 const DEFAULT_ENDPOINT = "https://openspeech.bytedance.com/api/v1/tts";
 const DEFAULT_V3_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
+const DEFAULT_LONG_SUBMIT_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/submit";
+const DEFAULT_LONG_QUERY_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/query";
 const DEFAULT_V3_RESOURCE_ID = "seed-tts-2.0";
 const DEFAULT_V3_VOICE = "zh_female_xiaohe_uranus_bigtts";
 const CONFIG_FILE_NAME = "config.json";
@@ -19,6 +21,9 @@ Usage:
   volc-tts "要合成的文本" -o out.mp3
   volc-tts --text "要合成的文本" --out out.wav --encoding wav
   volc-tts --input script.txt --out out.mp3
+  volc-tts long run --input script.txt --out out.mp3
+  volc-tts long submit --input script.txt
+  volc-tts long query --task-id task_id --out out.mp3
   volc-tts auth login
   volc-tts auth status
   volc-tts auth logout
@@ -40,6 +45,8 @@ Options:
       --token <token>            Volcengine TTS access token
       --cluster <cluster>        TTS cluster, default: volcano_tts
       --endpoint <url>           TTS endpoint, default: ${DEFAULT_ENDPOINT}
+      --submit-endpoint <url>    Long-text submit endpoint, default: ${DEFAULT_LONG_SUBMIT_ENDPOINT}
+      --query-endpoint <url>     Long-text query endpoint, default: ${DEFAULT_LONG_QUERY_ENDPOINT}
       --resource-id <id>         Optional API resource ID header for newer endpoints
       --uid <uid>                User ID in request payload, default: volc-tts-cli
       --encoding <format>        mp3, wav, pcm, ogg_opus, default: mp3
@@ -62,6 +69,12 @@ Options:
       --request-json <json>      Merge extra JSON into payload.request
       --app-json <json>          Merge extra JSON into payload.app
       --header <name:value>      Add a custom HTTP header; repeatable
+      --unique-id <id>           Long-text unique request ID; becomes task ID
+      --task-id <id>             Long-text task ID for query
+      --callback-url <url>       Long-text callback URL
+      --poll-interval-ms <ms>    Long-text query poll interval, default: 3000
+      --timeout-ms <ms>          Long-text run timeout, default: 600000
+      --json                     Print JSON for long submit/query/run metadata
       --config <file>            Auth config path, default: ~/.config/volc-tts-cli/config.json
       --env-file <file>          Load env file, default: .env when present
       --dry-run                  Print the request with secrets redacted
@@ -73,6 +86,7 @@ Examples:
   volc-tts auth login --app-id appid --token token --voice voice_type
   volc-tts "今天这期主要看几个 AI 开发工具。" -o speech.mp3
   volc-tts --input script.txt --voice zh_female_xxx --encoding wav -o speech.wav
+  volc-tts long run --input script.txt --app-id appid --token access_key -o speech.mp3
 `);
 }
 
@@ -133,6 +147,12 @@ function parseArgs(argv) {
         break;
       case "--endpoint":
         options.endpoint = next();
+        break;
+      case "--submit-endpoint":
+        options.submitEndpoint = next();
+        break;
+      case "--query-endpoint":
+        options.queryEndpoint = next();
         break;
       case "--resource-id":
         options.resourceId = next();
@@ -199,6 +219,24 @@ function parseArgs(argv) {
         break;
       case "--header":
         options.headers.push(next());
+        break;
+      case "--unique-id":
+        options.uniqueId = next();
+        break;
+      case "--task-id":
+        options.taskId = next();
+        break;
+      case "--callback-url":
+        options.callbackUrl = next();
+        break;
+      case "--poll-interval-ms":
+        options.pollIntervalMs = Number(next());
+        break;
+      case "--timeout-ms":
+        options.timeoutMs = Number(next());
+        break;
+      case "--json":
+        options.json = true;
         break;
       case "--config":
         options.config = next();
@@ -302,6 +340,27 @@ function buildHeaders(config, options) {
   return headers;
 }
 
+function buildLongHeaders(config, options) {
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Api-App-Id": config.appId,
+    "X-Api-Access-Key": config.token,
+    "X-Api-Resource-Id": config.resourceId,
+    "X-Api-Request-Id": randomUUID(),
+  };
+
+  for (const header of options.headers ?? []) {
+    const index = header.indexOf(":");
+    if (index <= 0) throw new Error(`Invalid --header value: ${header}`);
+    const name = header.slice(0, index).trim();
+    const value = header.slice(index + 1).trim();
+    if (!name || !value) throw new Error(`Invalid --header value: ${header}`);
+    headers[name] = value;
+  }
+
+  return headers;
+}
+
 function buildPayload(text, config, options) {
   if (config.authMode === "api-key") {
     return buildApiKeyPayload(text, config, options);
@@ -388,6 +447,53 @@ function buildApiKeyPayload(text, config, options) {
       ...(options.language ? { language: options.language } : {}),
       ...(options.requestJson ?? {}),
     },
+  };
+}
+
+function buildLongPayload(text, config, options) {
+  const audioParams = {
+    format: normalizeV3Encoding(config.encoding),
+    sample_rate: options.rate ?? 24000,
+  };
+
+  if (config.speed !== 1) audioParams.speech_rate = config.speed;
+  if (config.volume !== 1) audioParams.loudness_rate = config.volume;
+  if (config.pitch !== 1) audioParams.pitch_rate = config.pitch;
+  if (options.speechRate !== undefined) audioParams.speech_rate = options.speechRate;
+  if (options.loudnessRate !== undefined) audioParams.loudness_rate = options.loudnessRate;
+  if (options.pitchRate !== undefined) audioParams.pitch_rate = options.pitchRate;
+  if (options.emotion) audioParams.emotion = options.emotion;
+  if (options.emotionScale !== undefined) audioParams.emotion_scale = options.emotionScale;
+  Object.assign(audioParams, options.audioJson ?? {});
+
+  const additions = {};
+  if (options.contexts.length > 0) {
+    additions.context_texts = options.contexts;
+  }
+  if (options.sectionId) {
+    additions.section_id = options.sectionId;
+  }
+  if (options.tagParser) {
+    additions.use_tag_parser = true;
+  }
+
+  const reqParams = {
+    text,
+    speaker: config.voice,
+    audio_params: audioParams,
+    ...(Object.keys(additions).length > 0 ? { additions: JSON.stringify(additions) } : {}),
+    ...(options.model ? { model: options.model } : {}),
+    ...(options.language ? { language: options.language } : {}),
+    ...(options.callbackUrl ? { callback_url: options.callbackUrl } : {}),
+    ...(options.requestJson ?? {}),
+  };
+
+  return {
+    user: {
+      uid: config.uid,
+    },
+    ...(options.uniqueId ? { unique_id: options.uniqueId } : {}),
+    req_params: reqParams,
   };
 }
 
@@ -533,21 +639,26 @@ async function handleAuth(argv) {
 
   if (action === "login") {
     const existing = await loadAuthConfig(configPath);
+    const hasLegacyInput =
+      options.appId !== undefined ||
+      options.token !== undefined ||
+      process.env.VOLC_TTS_APP_ID !== undefined ||
+      process.env.VOLC_TTS_TOKEN !== undefined;
     const apiKey =
       options.apiKey ??
       process.env.VOLC_TTS_API_KEY ??
       existing.apiKey ??
-      (await promptSecret("API key (leave empty for legacy App ID/Token)", ""));
-    const appId = apiKey
-      ? undefined
-      : options.appId ??
-        process.env.VOLC_TTS_APP_ID ??
-        (await promptText("App ID", existing.appId));
-    const token = apiKey
-      ? undefined
-      : options.token ??
-        process.env.VOLC_TTS_TOKEN ??
-        (await promptSecret("Access token", existing.token));
+      (hasLegacyInput ? undefined : await promptSecret("API key (leave empty for legacy App ID/Token)", ""));
+    const appId =
+      options.appId ??
+      process.env.VOLC_TTS_APP_ID ??
+      existing.appId ??
+      (apiKey && !hasLegacyInput ? undefined : await promptText("App ID", existing.appId));
+    const token =
+      options.token ??
+      process.env.VOLC_TTS_TOKEN ??
+      existing.token ??
+      (apiKey && !hasLegacyInput ? undefined : await promptSecret("Access token", existing.token));
     const voice =
       options.voice ??
       process.env.VOLC_TTS_VOICE_TYPE ??
@@ -653,6 +764,7 @@ function redactRequest(headers, payload) {
       ...headers,
       Authorization: headers.Authorization ? "Bearer;****" : undefined,
       "X-Api-Key": headers["X-Api-Key"] ? "****" : undefined,
+      "X-Api-Access-Key": headers["X-Api-Access-Key"] ? "****" : undefined,
     },
     payload: payload.app
       ? {
@@ -688,6 +800,30 @@ function validateConfig(config, options) {
   assertFiniteNumber("--emotion-scale", options.emotionScale);
 }
 
+function validateLongConfig(config, options, needsVoice = true) {
+  const missing = [];
+  if (!config.appId) missing.push("VOLC_TTS_APP_ID or --app-id");
+  if (!config.token) missing.push("VOLC_TTS_TOKEN/Access Key or --token");
+  if (!config.resourceId) missing.push("VOLC_TTS_RESOURCE_ID or --resource-id");
+  if (needsVoice && !config.voice) missing.push("VOLC_TTS_VOICE_TYPE or --voice");
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required long-text config: ${missing.join(", ")}. Long-text submit/query uses X-Api-App-Id and X-Api-Access-Key, not X-Api-Key.`,
+    );
+  }
+
+  assertFiniteNumber("--speed", options.speed);
+  assertFiniteNumber("--volume", options.volume);
+  assertFiniteNumber("--pitch", options.pitch);
+  assertFiniteNumber("--rate", options.rate);
+  assertFiniteNumber("--speech-rate", options.speechRate);
+  assertFiniteNumber("--loudness-rate", options.loudnessRate);
+  assertFiniteNumber("--pitch-rate", options.pitchRate);
+  assertFiniteNumber("--emotion-scale", options.emotionScale);
+  assertFiniteNumber("--poll-interval-ms", options.pollIntervalMs);
+  assertFiniteNumber("--timeout-ms", options.timeoutMs);
+}
+
 async function writeAudio(buffer, options, encoding) {
   if (options.stdout) {
     process.stdout.write(buffer);
@@ -704,6 +840,39 @@ function extensionForEncoding(encoding) {
   if (encoding === "ogg_opus") return "ogg";
   if (encoding === "pcm" || encoding === "raw") return "pcm";
   return encoding || "mp3";
+}
+
+async function readJsonResponse(response, label) {
+  const text = await response.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${label} returned non-JSON response: ${text.slice(0, 500)}`);
+  }
+
+  if (!response.ok) {
+    throw new Error(`${label} HTTP ${response.status}: ${JSON.stringify(json)}`);
+  }
+
+  if (json.code !== undefined && !isSuccessCode(json.code)) {
+    throw new Error(`${label} failed: code=${json.code} message=${json.message ?? JSON.stringify(json)}`);
+  }
+
+  return json;
+}
+
+async function downloadAudioUrl(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Audio download HTTP ${response.status}: ${text.slice(0, 300)}`);
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function parseTtsResponse(response, config) {
@@ -808,11 +977,161 @@ function looksLikeJson(text) {
   return trimmed.startsWith("{") || trimmed.startsWith("[");
 }
 
+async function handleLong(argv) {
+  const first = argv[0];
+  const action = first && !first.startsWith("-") ? first : "run";
+  const options = parseArgs(first && !first.startsWith("-") ? argv.slice(1) : argv);
+
+  if (options.help) {
+    printHelp();
+    return;
+  }
+
+  await loadEnvFile(options.envFile ?? ".env");
+  const authConfig = await loadAuthConfig(getConfigPath(options));
+  const config = {
+    appId: configuredValue(options.appId, "VOLC_TTS_APP_ID", authConfig.appId),
+    token: configuredValue(options.token, "VOLC_TTS_TOKEN", authConfig.token),
+    voice: configuredValue(options.voice, "VOLC_TTS_VOICE_TYPE", authConfig.voice, DEFAULT_V3_VOICE),
+    resourceId: configuredValue(options.resourceId, "VOLC_TTS_RESOURCE_ID", authConfig.resourceId, DEFAULT_V3_RESOURCE_ID),
+    uid: configuredValue(options.uid, "VOLC_TTS_UID", authConfig.uid, "volc-tts-cli"),
+    encoding: configuredValue(options.encoding, "VOLC_TTS_ENCODING", authConfig.encoding, "mp3"),
+    speed: options.speed ?? Number(process.env.VOLC_TTS_SPEED ?? authConfig.speed ?? 1),
+    volume: options.volume ?? Number(process.env.VOLC_TTS_VOLUME ?? authConfig.volume ?? 1),
+    pitch: options.pitch ?? Number(process.env.VOLC_TTS_PITCH ?? authConfig.pitch ?? 1),
+    submitEndpoint: configuredValue(
+      options.submitEndpoint,
+      "VOLC_TTS_LONG_SUBMIT_ENDPOINT",
+      authConfig.submitEndpoint,
+      DEFAULT_LONG_SUBMIT_ENDPOINT,
+    ),
+    queryEndpoint: configuredValue(
+      options.queryEndpoint,
+      "VOLC_TTS_LONG_QUERY_ENDPOINT",
+      authConfig.queryEndpoint,
+      DEFAULT_LONG_QUERY_ENDPOINT,
+    ),
+  };
+
+  if (action === "submit" || action === "run") {
+    validateLongConfig(config, options, true);
+    const text = await getText(options);
+    const headers = buildLongHeaders(config, options);
+    const payload = buildLongPayload(text, config, options);
+
+    if (options.dryRun) {
+      console.log(JSON.stringify({ endpoint: config.submitEndpoint, ...redactRequest(headers, payload) }, null, 2));
+      return;
+    }
+
+    const submitJson = await postLongJson(config.submitEndpoint, headers, payload, "long submit");
+    const taskId = submitJson.data?.task_id;
+    if (!taskId) {
+      throw new Error(`Long-text submit response has no task_id: ${JSON.stringify(submitJson)}`);
+    }
+
+    if (action === "submit") {
+      if (options.json) {
+        console.log(JSON.stringify(submitJson, null, 2));
+      } else {
+        console.log(taskId);
+      }
+      return;
+    }
+
+    await pollLongTask(taskId, config, options, submitJson);
+    return;
+  }
+
+  if (action === "query") {
+    validateLongConfig(config, options, false);
+    const taskId = options.taskId ?? options.positional[0];
+    if (!taskId) throw new Error("Long-text query requires --task-id or a positional task ID.");
+    const headers = buildLongHeaders(config, options);
+    const payload = { task_id: taskId };
+
+    if (options.dryRun) {
+      console.log(JSON.stringify({ endpoint: config.queryEndpoint, ...redactRequest(headers, payload) }, null, 2));
+      return;
+    }
+
+    const queryJson = await postLongJson(config.queryEndpoint, headers, payload, "long query");
+    await handleLongQueryResult(queryJson, config, options);
+    return;
+  }
+
+  throw new Error(`Unknown long command: ${action}`);
+}
+
+async function postLongJson(endpoint, headers, payload, label) {
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+  return readJsonResponse(response, label);
+}
+
+async function pollLongTask(taskId, config, options, submitJson) {
+  const startedAt = Date.now();
+  const intervalMs = options.pollIntervalMs ?? 3000;
+  const timeoutMs = options.timeoutMs ?? 600000;
+  const headers = buildLongHeaders(config, options);
+
+  console.error(`Submitted long-text task ${taskId}`);
+
+  while (true) {
+    const queryJson = await postLongJson(config.queryEndpoint, headers, { task_id: taskId }, "long query");
+    const status = queryJson.data?.task_status;
+
+    if (status === 2) {
+      await handleLongQueryResult(queryJson, config, options, submitJson);
+      return;
+    }
+
+    if (status === 3) {
+      throw new Error(`Long-text task failed: ${JSON.stringify(queryJson)}`);
+    }
+
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(`Long-text task ${taskId} timed out after ${timeoutMs}ms. Retry later with: volc-tts long query --task-id ${taskId}`);
+    }
+
+    console.error(`Task ${taskId} status=${status ?? "unknown"}; polling again in ${intervalMs}ms`);
+    await sleep(intervalMs);
+  }
+}
+
+async function handleLongQueryResult(queryJson, config, options, submitJson = undefined) {
+  const audioUrl = queryJson.data?.audio_url;
+
+  if (audioUrl && (options.out || options.stdout)) {
+    const audio = await downloadAudioUrl(audioUrl);
+    await writeAudio(audio, options, config.encoding);
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify({ submit: submitJson, query: queryJson }, null, 2));
+    return;
+  }
+
+  if (!audioUrl) {
+    console.log(JSON.stringify(queryJson, null, 2));
+  } else if (!options.out && !options.stdout) {
+    console.log(audioUrl);
+  }
+}
+
 async function main() {
   const argv = process.argv.slice(2);
 
   if (argv[0] === "auth") {
     await handleAuth(argv.slice(1));
+    return;
+  }
+
+  if (argv[0] === "long") {
+    await handleLong(argv.slice(1));
     return;
   }
 

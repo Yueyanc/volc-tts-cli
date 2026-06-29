@@ -1,6 +1,6 @@
 {
   "name": "volc-tts-cli",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "A small CLI for Volcengine / Doubao text-to-speech HTTP synthesis.",
   "type": "module",
   "bin": {

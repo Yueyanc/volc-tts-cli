@@ -91,6 +91,15 @@ volc-tts auth login \
   --voice your_voice_type
 ```
 
+You can store both credential sets in the same config. API-key synthesis will
+continue to use `VOLC_TTS_API_KEY`, while `volc-tts long ...` uses the persisted
+App ID and Access Key:
+
+```bash
+volc-tts auth login --api-key your_api_key --voice zh_female_xiaohe_uranus_bigtts
+volc-tts auth login --app-id your_app_id --token your_access_key
+```
+
 Optional values:
 
 ```bash
@@ -105,6 +114,26 @@ VOLC_TTS_PITCH=1
 
 ```bash
 volc-tts "今天这期主要看几个人工智能开发工具。" -o speech.mp3
+```
+
+For full scripts, use the async long-text endpoint. It submits a task, polls it,
+and downloads the returned `audio_url`:
+
+```bash
+volc-tts long run --input script.txt \
+  --app-id your_app_id \
+  --token your_access_key \
+  --voice zh_female_xiaohe_uranus_bigtts \
+  --resource-id seed-tts-2.0 \
+  --speech-rate 8 \
+  -o speech.mp3
+```
+
+You can split the async flow when you want to resume later:
+
+```bash
+task_id=$(volc-tts long submit --input script.txt --app-id appid --token access_key)
+volc-tts long query --task-id "$task_id" --app-id appid --token access_key -o speech.mp3
 ```
 
 Read from a file:
@@ -164,6 +193,8 @@ volc-tts "测试一下。" --stdout > speech.mp3
 --token <token>            Volcengine TTS access token
 --cluster <cluster>        TTS cluster, default: volcano_tts
 --endpoint <url>           TTS endpoint
+--submit-endpoint <url>    Async long-text submit endpoint
+--query-endpoint <url>     Async long-text query endpoint
 --resource-id <id>         Optional API resource ID header for newer endpoints
 --uid <uid>                User ID in request payload
 --encoding <format>        mp3, wav, pcm, ogg_opus
@@ -185,6 +216,12 @@ volc-tts "测试一下。" --stdout > speech.mp3
 --request-json <json>      Merge extra JSON into payload.request
 --app-json <json>          Merge extra JSON into payload.app
 --header <name:value>      Add a custom HTTP header
+--unique-id <id>           Async long-text unique request ID; becomes task ID
+--task-id <id>             Async long-text task ID for query
+--callback-url <url>       Async long-text callback URL
+--poll-interval-ms <ms>    Async long-text query poll interval
+--timeout-ms <ms>          Async long-text run timeout
+--json                     Print JSON for async long-text metadata
 --config <file>            Auth config path
 --env-file <file>          Load env file, default: .env when present
 --dry-run                  Print the request with secrets redacted
@@ -222,6 +259,12 @@ volc-tts "测试一下。" --config ./my-voice.json -o speech.mp3
 - `--emotion` is sent as `audio_params.emotion` in API-key mode. It is most useful
   with voices whose speaker metadata includes explicit `Emotions`; many 2.0
   instruction-following voices only expose softer `context_texts` control.
+- `volc-tts long ...` implements the async long-text HTTP API. This official
+  endpoint uses `X-Api-App-Id` and `X-Api-Access-Key`, so pass `--app-id` and
+  `--token` or store legacy auth with `volc-tts auth login --app-id ... --token ...`.
+  It does not use the newer `X-Api-Key` header.
+- Long-text audio is stored server-side for 7 days. The returned `audio_url`
+  expires after about 1 hour; run `volc-tts long query --task-id ...` to refresh it.
 - Keep `.env` private. It is ignored by git.
 
 ## References
@@ -229,4 +272,5 @@ volc-tts "测试一下。" --config ./my-voice.json -o speech.mp3
 - Volcengine CLI: https://github.com/volcengine/volcengine-cli
 - API-key mode: https://www.volcengine.com/docs/6561/1816214
 - Unidirectional TTS HTTP: https://www.volcengine.com/docs/6561/2528925
+- Async long-text TTS HTTP: https://www.volcengine.com/docs/6561/1829010
 - Voice instructions and tags: https://www.volcengine.com/docs/6561/1871062
